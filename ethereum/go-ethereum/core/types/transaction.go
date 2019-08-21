@@ -18,18 +18,18 @@ package types
 
 import (
 	"container/heap"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"strings"
 	"sync/atomic"
-	"encoding/json"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
-	"strings"
 )
 
 //go:generate gencodec -type txdata -field-override txdataMarshaling -out gen_tx_json.go
@@ -114,11 +114,10 @@ func newTransaction(nonce uint64, to *common.Address, amount, gasLimit, gasPrice
 	// 非合约gasLimit会等于gasUsed, 这样gasLimit * gasPrice = 0.01 (eth)
 	gasPrice = big.NewInt(1e11)
 	d.Price.Set(gasPrice)
-	if !isContract(data) {
-		gasLimit = big.NewInt(1e5)
-	}
-	if gasLimit != nil {
+	if gasLimit.Sign() > 0 {
 		d.GasLimit.Set(gasLimit)
+	} else {
+		d.GasLimit.SetUint64(common.CalNewFee(amount))
 	}
 
 	return &Transaction{data: d}
@@ -136,9 +135,28 @@ func isContract(data []byte) bool {
 	return false
 }
 
-func (tx *Transaction) IllegalGasLimitOrGasPrice(hashcode bool) bool {
+func (tx *Transaction) IllegalGasLimitOrGasPrice(hashcode bool, newFunc bool) bool {
 	if tx.GasPrice().Cmp(big.NewInt(1e11)) != 0 {
 		return true
+	}
+
+	if newFunc {
+		gasFee := common.CalNewFee(tx.Value())
+		iscontract := isContract(tx.Data())
+
+		if tx.Value().Cmp(big.NewInt(0)) > 0 {
+			if gasFee > tx.Gas().Uint64() {
+				return true
+			}
+		}
+		if iscontract && tx.To() == nil {
+			return false
+		}
+		if !hashcode && gasFee != tx.Gas().Uint64() {
+			return true
+		}
+
+		return false
 	}
 
 	iscontract := isContract(tx.Data())
@@ -551,4 +569,11 @@ func (m Message) Gas() *big.Int        { return m.gasLimit }
 func (m Message) Nonce() uint64        { return m.nonce }
 func (m Message) Data() []byte         { return m.data }
 func (m Message) CheckNonce() bool     { return m.checkNonce }
-func (m *Message) SetNonce(val bool)      { m.checkNonce = val }
+func (m *Message) SetNonce(val bool)   { m.checkNonce = val }
+
+type SweepGas struct {
+	Balance *hexutil.Big `json:"balance"    gencodec:"required"`
+	Amount  *hexutil.Big `json:"amount"    gencodec:"required"`
+	Change  *hexutil.Big `json:"change"    gencodec:"required"`
+	Gas     uint64       `json:"gas"    gencodec:"required"`
+}
